@@ -19,6 +19,9 @@ class MainActivity : FlutterActivity() {
     private var channel: MethodChannel? = null
     private var scanResult: MethodChannel.Result? = null
     private var pendingReturn: Map<String, Any?>? = null
+    private val bridgePreferences by lazy {
+        getSharedPreferences("caravela_stone_pos", MODE_PRIVATE)
+    }
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -29,10 +32,23 @@ class MainActivity : FlutterActivity() {
                 "launchPayment" -> launchPayment(call.arguments as? Map<*, *>, result)
                 "printBill" -> printBill(call.arguments as? Map<*, *>, result)
                 "openManagement" -> openManagement(call.arguments as? Map<*, *>, result)
-                "consumePendingReturn" -> {
-                    val value = pendingReturn
-                    pendingReturn = null
+                "readPendingReturn" -> {
+                    val value = pendingReturn ?: readStoredMap("pending_stone_return")
                     result.success(value)
+                }
+                "clearPendingReturn" -> {
+                    pendingReturn = null
+                    bridgePreferences.edit().remove("pending_stone_return").apply()
+                    result.success(null)
+                }
+                "savePaymentContext" -> {
+                    storeMap("pending_payment_context", call.arguments as? Map<*, *>)
+                    result.success(null)
+                }
+                "readPaymentContext" -> result.success(readStoredMap("pending_payment_context"))
+                "clearPaymentContext" -> {
+                    bridgePreferences.edit().remove("pending_payment_context").apply()
+                    result.success(null)
                 }
                 else -> result.notImplemented()
             }
@@ -210,6 +226,50 @@ class MainActivity : FlutterActivity() {
         }
         val event = mapOf("host" to host, "values" to values)
         pendingReturn = event
+        storeMap("pending_stone_return", event)
         channel?.invokeMethod("stoneReturn", event)
+        intent?.data = null
+    }
+
+    private fun storeMap(key: String, values: Map<*, *>?) {
+        if (values == null) return
+        val json = JSONObject()
+        values.forEach { (name, value) ->
+            if (name != null && value != null) json.put(name.toString(), value)
+        }
+        bridgePreferences.edit().putString(key, json.toString()).apply()
+    }
+
+    private fun readStoredMap(key: String): Map<String, Any?>? {
+        val raw = bridgePreferences.getString(key, null) ?: return null
+        return try {
+            val json = JSONObject(raw)
+            val values = mutableMapOf<String, Any?>()
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val name = keys.next()
+                values[name] = jsonToNative(json.get(name))
+            }
+            values
+        } catch (error: Exception) {
+            throw IllegalStateException("Dados Stone pendentes inválidos.", error)
+        }
+    }
+
+    private fun jsonToNative(value: Any?): Any? = when (value) {
+        is JSONObject -> {
+            val map = mutableMapOf<String, Any?>()
+            val keys = value.keys()
+            while (keys.hasNext()) {
+                val name = keys.next()
+                map[name] = jsonToNative(value.get(name))
+            }
+            map
+        }
+        is JSONArray -> (0 until value.length()).map { index ->
+            jsonToNative(value.get(index))
+        }
+        JSONObject.NULL -> null
+        else -> value
     }
 }
