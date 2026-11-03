@@ -3,12 +3,7 @@ class AppConfig {
 
   static const apiBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: '',
-  );
-
-  static const terminalId = String.fromEnvironment(
-    'TERMINAL_ID',
-    defaultValue: 'pos-terminal',
+    defaultValue: 'https://novo-caravela.vercel.app',
   );
 
   static const supportContact = String.fromEnvironment(
@@ -17,7 +12,6 @@ class AppConfig {
   );
 
   static const appName = 'Caravela PDV';
-  static const apiPrefix = '/api/pos/v1';
   static const stoneReturnScheme = 'caravelapdv';
 
   static bool get isConfigured {

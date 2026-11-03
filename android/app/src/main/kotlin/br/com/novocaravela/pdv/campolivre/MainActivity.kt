@@ -28,6 +28,7 @@ class MainActivity : FlutterActivity() {
                 "scanBarcode" -> launchScanner(result)
                 "launchPayment" -> launchPayment(call.arguments as? Map<*, *>, result)
                 "printBill" -> printBill(call.arguments as? Map<*, *>, result)
+                "openManagement" -> openManagement(call.arguments as? Map<*, *>, result)
                 "consumePendingReturn" -> {
                     val value = pendingReturn
                     pendingReturn = null
@@ -62,6 +63,15 @@ class MainActivity : FlutterActivity() {
             result.error("INVALID_AMOUNT", "O valor da conta é inválido para o app Stone.", null)
             return
         }
+        val transactionType = when (arguments?.get("transactionType")?.toString()?.uppercase()) {
+            "DEBIT" -> "debit"
+            "CREDIT" -> "credit"
+            "PIX" -> "PIX"
+            else -> {
+                result.error("INVALID_PAYMENT_TYPE", "Selecione débito, crédito ou Pix.", null)
+                return
+            }
+        }
 
         val builder = Uri.Builder()
             .scheme("payment-app")
@@ -69,17 +79,20 @@ class MainActivity : FlutterActivity() {
             .appendQueryParameter("return_scheme", returnScheme)
             .appendQueryParameter("amount", amount.toString())
             .appendQueryParameter("editable_amount", "0")
+            .appendQueryParameter("transaction_type", transactionType)
 
         val orderId = arguments?.get("orderId")?.toString()
-        if (orderId.isNullOrBlank() || orderId.toLongOrNull() == null) {
-            result.error(
-                "INVALID_ORDER_ID",
-                "O sistema de gestão não forneceu um pedido numérico para o pagamento.",
-                null
-            )
-            return
+        if (!orderId.isNullOrBlank()) {
+            if (orderId.toLongOrNull() == null) {
+                result.error(
+                    "INVALID_ORDER_ID",
+                    "O identificador Stone precisa ser numérico.",
+                    null
+                )
+                return
+            }
+            builder.appendQueryParameter("order_id", orderId)
         }
-        builder.appendQueryParameter("order_id", orderId)
         launchExternalIntent(builder.build(), result)
     }
 
@@ -107,6 +120,23 @@ class MainActivity : FlutterActivity() {
             .appendQueryParameter("SCHEME_RETURN", returnScheme)
             .appendQueryParameter("PRINTABLE_CONTENT", json.toString())
         launchExternalIntent(builder.build(), result)
+    }
+
+    private fun openManagement(arguments: Map<*, *>?, result: MethodChannel.Result) {
+        val rawUrl = arguments?.get("url")?.toString()
+        val uri = runCatching { Uri.parse(rawUrl) }.getOrNull()
+        if (uri == null || uri.scheme != "https" || uri.host.isNullOrBlank()) {
+            result.error("INVALID_MANAGEMENT_URL", "O endereço da gestão não é válido.", null)
+            return
+        }
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, uri))
+            result.success(null)
+        } catch (error: ActivityNotFoundException) {
+            result.error("BROWSER_UNAVAILABLE", "Não há navegador disponível neste terminal.", null)
+        } catch (error: Exception) {
+            result.error("OPEN_URL_FAILED", error.message, null)
+        }
     }
 
     private fun launchExternalIntent(uri: Uri, result: MethodChannel.Result) {
@@ -166,6 +196,9 @@ class MainActivity : FlutterActivity() {
                 "amount",
                 "order_id",
                 "itk",
+                "atk",
+                "type",
+                "brand",
                 "authorization_code"
             )
         } else {

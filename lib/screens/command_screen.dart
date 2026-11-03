@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../config/app_config.dart';
 import '../models/pos_models.dart';
 import '../services/stone_pos_bridge.dart';
 import '../widgets/support_button.dart';
@@ -8,13 +7,19 @@ import '../widgets/support_button.dart';
 class CommandScreen extends StatefulWidget {
   const CommandScreen({
     required this.session,
+    required this.bootstrap,
     required this.onLookup,
     required this.onLogout,
     super.key,
   });
 
   final PosSession session;
-  final Future<void> Function(String code) onLookup;
+  final PosBootstrap bootstrap;
+  final Future<void> Function(
+    String code, {
+    String? tableId,
+    String? waiterEmployeeId,
+  }) onLookup;
   final VoidCallback onLogout;
 
   @override
@@ -25,6 +30,19 @@ class _CommandScreenState extends State<CommandScreen> {
   final _codeController = TextEditingController();
   bool _busy = false;
   String? _error;
+  String? _selectedTableId;
+  String? _selectedWaiterId;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.bootstrap.tables.isNotEmpty) {
+      _selectedTableId = widget.bootstrap.tables.first.id;
+    }
+    if (widget.bootstrap.waiters.isNotEmpty) {
+      _selectedWaiterId = widget.bootstrap.waiters.first.id;
+    }
+  }
 
   @override
   void dispose() {
@@ -38,12 +56,21 @@ class _CommandScreenState extends State<CommandScreen> {
       setState(() => _error = 'Digite ou leia o número da comanda.');
       return;
     }
+    if (widget.bootstrap.profile == 'WAITER' &&
+        (_selectedTableId == null || _selectedWaiterId == null)) {
+      setState(() => _error = 'Selecione a mesa e o garçom do pedido.');
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      await widget.onLookup(code);
+      await widget.onLookup(
+        code,
+        tableId: _selectedTableId,
+        waiterEmployeeId: _selectedWaiterId,
+      );
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
     } finally {
@@ -117,16 +144,15 @@ class _CommandScreenState extends State<CommandScreen> {
                   ),
                   const SizedBox(height: 34),
                   Text(
-                    'Identifique a comanda',
+                    'Identifique o pedido',
                     style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                           fontWeight: FontWeight.w800,
                         ),
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    widget.session.isCashier
-                        ? 'A conta do cliente será carregada para conferência.'
-                        : 'Digite o número ou leia o código da comanda.',
+                    'Digite o número ou leia o código da comanda para ' +
+                        widget.session.profileName + '.',
                     style: Theme.of(context).textTheme.bodyLarge,
                   ),
                   const SizedBox(height: 20),
@@ -137,7 +163,7 @@ class _CommandScreenState extends State<CommandScreen> {
                     textInputAction: TextInputAction.go,
                     onSubmitted: (_) => _lookup(),
                     decoration: InputDecoration(
-                      labelText: 'Número da comanda',
+                      labelText: 'Número da comanda ou pedido',
                       hintText: 'Ex.: 1234',
                       prefixIcon: const Icon(Icons.confirmation_number_outlined),
                       suffixIcon: IconButton(
@@ -147,6 +173,42 @@ class _CommandScreenState extends State<CommandScreen> {
                       ),
                     ),
                   ),
+                  if (widget.bootstrap.profile == 'WAITER') ...[
+                    const SizedBox(height: 14),
+                    DropdownButtonFormField<String>(
+                      value: _selectedTableId,
+                      decoration: const InputDecoration(
+                        labelText: 'Mesa',
+                        prefixIcon: Icon(Icons.table_bar_outlined),
+                      ),
+                      items: widget.bootstrap.tables
+                          .map((table) => DropdownMenuItem(
+                                value: table.id,
+                                child: Text(table.name),
+                              ))
+                          .toList(),
+                      onChanged: _busy
+                          ? null
+                          : (value) => setState(() => _selectedTableId = value),
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      value: _selectedWaiterId,
+                      decoration: const InputDecoration(
+                        labelText: 'Garçom',
+                        prefixIcon: Icon(Icons.badge_outlined),
+                      ),
+                      items: widget.bootstrap.waiters
+                          .map((waiter) => DropdownMenuItem(
+                                value: waiter.id,
+                                child: Text(waiter.name),
+                              ))
+                          .toList(),
+                      onChanged: _busy
+                          ? null
+                          : (value) => setState(() => _selectedWaiterId = value),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   OutlinedButton.icon(
                     onPressed: _busy ? null : _scan,
@@ -176,7 +238,10 @@ class _CommandScreenState extends State<CommandScreen> {
                   ),
                   const SizedBox(height: 14),
                   Text(
-                    'Terminal ' + AppConfig.terminalId,
+                    widget.bootstrap.event.name +
+                        (widget.bootstrap.registerName.isEmpty
+                            ? ''
+                            : ' · ' + widget.bootstrap.registerName),
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodySmall,
                   ),

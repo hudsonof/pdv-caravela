@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'config/app_config.dart';
@@ -6,9 +8,9 @@ import 'screens/cashier_screen.dart';
 import 'screens/catalog_screen.dart';
 import 'screens/command_screen.dart';
 import 'screens/login_screen.dart';
-import 'screens/table_screen.dart';
 import 'services/management_api.dart';
 import 'services/stone_pos_bridge.dart';
+import 'widgets/support_button.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -67,7 +69,7 @@ class CaravelaPdvApp extends StatelessWidget {
   }
 }
 
-enum _FlowPage { login, command, table, catalog, cashier }
+enum _FlowPage { login, events, command, catalog, checkout, management }
 
 class _PosFlow extends StatefulWidget {
   const _PosFlow();
@@ -80,11 +82,15 @@ class _PosFlowState extends State<_PosFlow> {
   final ManagementApi _api = ManagementApi();
   _FlowPage _page = _FlowPage.login;
   PosSession? _session;
+  PosEvent? _event;
+  PosBootstrap? _bootstrap;
   PosCommand? _command;
   PosBill? _bill;
+  List<PosEvent> _events = const [];
   List<PosProduct> _products = const [];
   bool _busy = false;
   String _busyMessage = 'Aguarde…';
+  String? _pageError;
 
   @override
   void dispose() {
@@ -92,82 +98,115 @@ class _PosFlowState extends State<_PosFlow> {
     super.dispose();
   }
 
-  Future<PosSession> _login(String username, String password) async {
-    final session = await _api.login(username: username, password: password);
+  Future<PosSession> _login(String email, String password) async {
+    final session = await _api.login(email: email, password: password);
+    if (!session.isPosUser && !session.isManager && !session.isAdmin) {
+      await _api.signOut();
+      throw const ApiException(
+        'Este usuário não possui um perfil compatível com o aplicativo.',
+      );
+    }
+    if (!mounted) return session;
+    if (session.isManager || session.isAdmin) {
+      setState(() {
+        _session = session;
+        _page = _FlowPage.management;
+      });
+      return session;
+    }
+
+    final events = await _api.getEvents();
     if (!mounted) return session;
     setState(() {
       _session = session;
-      _page = _FlowPage.command;
+      _events = events;
+      _pageError = null;
+      _page = _FlowPage.events;
     });
     return session;
   }
 
-  Future<void> _lookupCommand(String code) async {
-    final session = _session;
-    if (session == null) throw const ApiException('A sessão expirou. Entre novamente.');
+  Future<void> _refreshEvents() async {
     setState(() {
       _busy = true;
-      _busyMessage = 'Consultando comanda…';
+      _busyMessage = 'Buscando eventos com caixa aberto…';
+      _pageError = null;
     });
     try {
-      final command = await _api.findCommand(code, session.accessToken);
-      if (command.id.isEmpty) {
-        throw const ApiException('A comanda recebida não possui identificador.');
-      }
-      if (command.isClosed && !session.isCashier) {
-        throw const ApiException('Esta comanda já está fechada.');
-      }
-
-      if (session.isCashier) {
-        final bill = await _api.getBill(
-          commandId: command.id,
-          token: session.accessToken,
-        );
-        if (!mounted) return;
-        setState(() {
-          _command = command;
-          _bill = bill;
-          _page = _FlowPage.cashier;
-        });
-      } else {
-        if (command.isClosed) {
-          throw const ApiException('Esta comanda já está fechada.');
-        }
-        setState(() {
-          _command = command;
-          _page = _FlowPage.table;
-        });
-      }
+      final events = await _api.getEvents();
+      if (!mounted) return;
+      setState(() => _events = events);
+    } catch (error) {
+      if (mounted) setState(() => _pageError = error.toString());
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<void> _continueToCatalog(String? tableNumber) async {
-    final session = _session;
-    final command = _command;
-    if (session == null || command == null) {
-      throw const ApiException('A sessão da comanda não está disponível.');
+  Future<void> _selectEvent(PosEvent event) async {
+    setState(() {
+      _busy = true;
+      _busyMessage = 'Carregando evento, sessão e catálogo…';
+      _pageError = null;
+    });
+    try {
+      final bootstrap = await _api.getBootstrap(event.id);
+      if (!mounted) return;
+      setState(() {
+        _event = event;
+        _bootstrap = bootstrap;
+        _products = bootstrap.products;
+        _page = _FlowPage.command;
+      });
+    } catch (error) {
+      if (mounted) setState(() => _pageError = error.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _lookupCommand(
+    String code, {
+    String? tableId,
+    String? waiterEmployeeId,
+  }) async {
+    final event = _event;
+    final bootstrap = _bootstrap;
+    if (event == null || bootstrap == null) {
+      throw const ApiException('Selecione novamente o evento do pedido.');
     }
     setState(() {
       _busy = true;
-      _busyMessage = 'Carregando produtos…';
+      _busyMessage = 'Consultando a comanda…';
     });
     try {
-      if (tableNumber != null && tableNumber.isNotEmpty) {
-        await _api.updateTable(
-          commandId: command.id,
-          tableNumber: tableNumber,
-          token: session.accessToken,
-        );
+      final currentOrders = await _api.getOrders(event.id);
+      var order = _findOpenOrder(currentOrders, code);
+      if (order == null) {
+        try {
+          order = await _api.openOrder(
+            eventId: event.id,
+            commandCode: code,
+            idempotencyKey: _newIdempotencyKey('open'),
+            tableId: tableId,
+            waiterEmployeeId: waiterEmployeeId,
+          );
+        } on ApiException catch (error) {
+          if (error.statusCode != 409) rethrow;
+          final refreshed = await _api.getOrders(event.id);
+          order = _findOpenOrder(refreshed, code);
+          if (order == null) rethrow;
+        }
       }
-      final products = await _api.getCatalog(
-        profileCode: session.profileCode,
-        token: session.accessToken,
-      );
+      if (order == null) {
+        throw const ApiException('Não foi possível localizar a comanda aberta.');
+      }
+      final resolvedOrder = order;
+      final bill = await _api.getBill(resolvedOrder.id);
       if (!mounted) return;
       setState(() {
-        _products = products;
+        _command = resolvedOrder;
+        _bill = bill;
         _page = _FlowPage.catalog;
       });
     } finally {
@@ -175,125 +214,302 @@ class _PosFlowState extends State<_PosFlow> {
     }
   }
 
+  PosCommand? _findOpenOrder(List<PosCommand> orders, String code) {
+    final normalizedCode = code.trim().toLowerCase();
+    for (final order in orders) {
+      if (order.code.trim().toLowerCase() == normalizedCode &&
+          order.status.toUpperCase() == 'OPEN') {
+        return order;
+      }
+    }
+    return null;
+  }
+
   Future<void> _submitItems(
     List<OrderLineRequest> items,
     String idempotencyKey,
   ) async {
-    final session = _session;
     final command = _command;
-    if (session == null || command == null) {
-      throw const ApiException('A sessão da comanda não está disponível.');
+    if (command == null) {
+      throw const ApiException('A comanda não está disponível.');
     }
     await _api.submitItems(
-      commandId: command.id,
+      orderId: command.id,
       items: items,
-      token: session.accessToken,
       idempotencyKey: idempotencyKey,
     );
+    final bill = await _api.getBill(command.id);
+    if (mounted) setState(() => _bill = bill);
   }
 
   Future<PosBill> _refreshBill() async {
-    final session = _session;
     final command = _command;
-    if (session == null || command == null) {
-      throw const ApiException('A sessão da comanda não está disponível.');
+    if (command == null) {
+      throw const ApiException('A comanda não está disponível.');
     }
-    final bill = await _api.getBill(
-      commandId: command.id,
-      token: session.accessToken,
-    );
+    final bill = await _api.getBill(command.id);
     if (mounted) setState(() => _bill = bill);
     return bill;
   }
 
-  Future<String> _preparePayment(String idempotencyKey) async {
-    final session = _session;
+  Future<PosBill> _recordPayment({
+    required int amountCents,
+    required String method,
+    required String idempotencyKey,
+  }) async {
     final command = _command;
-    final bill = _bill;
-    if (session == null || command == null || bill == null) {
-      throw const ApiException('A sessão da comanda não está disponível.');
+    if (command == null) {
+      throw const ApiException('A comanda não está disponível.');
     }
-    return _api.createPaymentAttempt(
-      commandId: command.id,
-      token: session.accessToken,
-      amountCents: bill.totalCents,
+    await _api.recordPayment(
+      orderId: command.id,
+      amountCents: amountCents,
+      method: method,
       idempotencyKey: idempotencyKey,
     );
-  }
-
-  Future<PosBill> _reconcilePayment(StoneReturn? paymentReturn) async {
-    final session = _session;
-    final command = _command;
-    if (session == null || command == null) {
-      throw const ApiException('A sessão da comanda não está disponível.');
-    }
-    final bill = paymentReturn == null
-        ? await _api.getBill(
-            commandId: command.id,
-            token: session.accessToken,
-          )
-        : await _api.reconcileStonePayment(
-            commandId: command.id,
-            token: session.accessToken,
-            paymentReturn: paymentReturn,
-          );
+    final bill = await _api.getBill(command.id);
     if (mounted) setState(() => _bill = bill);
     return bill;
+  }
+
+  String _newIdempotencyKey(String action) {
+    final now = DateTime.now().microsecondsSinceEpoch.toRadixString(16);
+    return 'pdv-$action-$now';
+  }
+
+  void _openCheckout() {
+    if (_bill == null) return;
+    setState(() => _page = _FlowPage.checkout);
+  }
+
+  void _backToCatalog() {
+    setState(() => _page = _FlowPage.catalog);
   }
 
   void _newCommand() {
     setState(() {
       _command = null;
       _bill = null;
-      _products = const [];
       _page = _FlowPage.command;
     });
   }
 
   void _logout() {
     setState(() {
+      _busy = true;
+      _busyMessage = 'Encerrando sessão…';
+    });
+    unawaited(_finishLogout());
+  }
+
+  Future<void> _finishLogout() async {
+    try {
+      await _api.signOut();
+    } catch (_) {
+      // O cookie jar também é limpo localmente quando a chamada falha.
+    }
+    if (!mounted) return;
+    setState(() {
       _session = null;
+      _event = null;
+      _bootstrap = null;
       _command = null;
       _bill = null;
+      _events = const [];
       _products = const [];
+      _pageError = null;
       _page = _FlowPage.login;
+      _busy = false;
     });
+  }
+
+  Future<void> _openManagement() async {
+    try {
+      await StonePosBridge.instance.openManagement(AppConfig.apiBaseUrl);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error.toString())),
+        );
+      }
+    }
+  }
+
+  Widget _eventsPage() {
+    final session = _session!;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Selecione o evento'),
+        actions: [
+          const SupportButton(),
+          IconButton(
+            onPressed: _busy ? null : _refreshEvents,
+            tooltip: 'Atualizar eventos',
+            icon: const Icon(Icons.refresh),
+          ),
+          IconButton(
+            onPressed: _logout,
+            tooltip: 'Sair',
+            icon: const Icon(Icons.logout),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 720),
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const CircleAvatar(child: Icon(Icons.person_outline)),
+                  title: Text(session.displayName),
+                  subtitle: Text(session.profileName + ' · ' + session.email),
+                ),
+                if (_pageError != null)
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Text(
+                      _pageError!,
+                      style: TextStyle(color: Theme.of(context).colorScheme.error),
+                    ),
+                  ),
+                Expanded(
+                  child: _events.isEmpty
+                      ? const Center(
+                          child: Padding(
+                            padding: EdgeInsets.all(24),
+                            child: Text(
+                              'Não há eventos abertos com caixa disponível para este usuário.',
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        )
+                      : ListView.separated(
+                          padding: const EdgeInsets.all(16),
+                          itemCount: _events.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 8),
+                          itemBuilder: (context, index) {
+                            final event = _events[index];
+                            return Card(
+                              child: ListTile(
+                                leading: const CircleAvatar(
+                                  child: Icon(Icons.event_available_outlined),
+                                ),
+                                title: Text(event.name),
+                                subtitle: event.startsAt == null
+                                    ? null
+                                    : Text(
+                                        MaterialLocalizations.of(context)
+                                            .formatMediumDate(event.startsAt!),
+                                      ),
+                                trailing: const Icon(Icons.chevron_right),
+                                onTap: _busy ? null : () => _selectEvent(event),
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _managementPage() {
+    final session = _session!;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Acesso à gestão'),
+        actions: [
+          IconButton(
+            onPressed: _logout,
+            tooltip: 'Sair',
+            icon: const Icon(Icons.logout),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Icon(Icons.admin_panel_settings_outlined, size: 52),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Olá, ' + session.displayName,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Sessão autenticada como ' + session.profileName +
+                        '. As rotas de operação do PDV são exclusivas dos perfis POS. Use o sistema de gestão para as funções administrativas disponíveis para sua conta.',
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 18),
+                  FilledButton.icon(
+                    onPressed: _openManagement,
+                    icon: const Icon(Icons.open_in_browser),
+                    label: const Text('Abrir sistema de gestão'),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'O navegador pode solicitar novo login. A sessão do app e a sessão do navegador são independentes.',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _currentPage() {
     switch (_page) {
       case _FlowPage.login:
         return LoginScreen(onLogin: _login);
+      case _FlowPage.events:
+        return _eventsPage();
       case _FlowPage.command:
         return CommandScreen(
           session: _session!,
+          bootstrap: _bootstrap!,
           onLookup: _lookupCommand,
-          onLogout: _logout,
-        );
-      case _FlowPage.table:
-        return TableScreen(
-          command: _command!,
-          onContinue: _continueToCatalog,
           onLogout: _logout,
         );
       case _FlowPage.catalog:
         return CatalogScreen(
           command: _command!,
+          bill: _bill!,
           products: _products,
           onSubmit: _submitItems,
+          onCheckout: _openCheckout,
           onLogout: _logout,
         );
-      case _FlowPage.cashier:
+      case _FlowPage.checkout:
         return CashierScreen(
           key: ValueKey(_command?.id),
           session: _session!,
           bill: _bill!,
           onRefresh: _refreshBill,
-          onPreparePayment: _preparePayment,
-          onPaymentReturn: _reconcilePayment,
+          onRecordPayment: _recordPayment,
           onNewCommand: _newCommand,
+          onBack: _backToCatalog,
           onLogout: _logout,
         );
+      case _FlowPage.management:
+        return _managementPage();
     }
   }
 

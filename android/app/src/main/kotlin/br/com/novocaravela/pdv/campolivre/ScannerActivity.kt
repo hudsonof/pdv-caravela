@@ -211,4 +211,3 @@ class ScannerActivity : ComponentActivity() {
         super.onDestroy()
     }
 }
-

@@ -15,59 +15,104 @@ class ApiException implements Exception {
   String toString() => message;
 }
 
+class _CookieJar {
+  final Map<String, Cookie> _cookies = {};
+
+  void absorb(HttpClientResponse response) {
+    for (final cookie in response.cookies) {
+      final expired = (cookie.maxAge != null && cookie.maxAge! <= 0) ||
+          (cookie.expires != null &&
+              cookie.expires!.isBefore(DateTime.now()));
+      if (expired) {
+        _cookies.remove(cookie.name);
+      } else {
+        _cookies[cookie.name] = cookie;
+      }
+    }
+  }
+
+  String? headerFor(Uri uri) {
+    final now = DateTime.now();
+    _cookies.removeWhere((_, cookie) =>
+        (cookie.maxAge != null && cookie.maxAge! <= 0) ||
+        (cookie.expires != null && cookie.expires!.isBefore(now)));
+    final matching = _cookies.values.where((cookie) {
+      if (cookie.secure && uri.scheme != 'https') return false;
+      final path = cookie.path;
+      return path == null || uri.path.startsWith(path);
+    }).toList();
+    if (matching.isEmpty) return null;
+    return matching.map((cookie) => '${cookie.name}=${cookie.value}').join('; ');
+  }
+
+  void clear() => _cookies.clear();
+}
+
 class ManagementApi {
   ManagementApi({String? baseUrl})
       : _baseUrl = (baseUrl ?? AppConfig.apiBaseUrl).replaceFirst(
           RegExp(r'/+$'),
           '',
         ) {
-    _client.connectionTimeout = const Duration(seconds: 10);
+    _client.connectionTimeout = const Duration(seconds: 12);
   }
 
   final String _baseUrl;
   final HttpClient _client = HttpClient();
+  final _CookieJar _cookieJar = _CookieJar();
+  PosSession? _session;
 
   bool get isConfigured => _baseUrl.isNotEmpty;
-
   Uri _uri(String path, [Map<String, String>? query]) {
     if (!isConfigured) {
-      throw const ApiException(
-        'Configure API_BASE_URL para conectar ao sistema de gestão.',
-      );
+      throw const ApiException('Configure a URL da API do sistema de gestão.');
     }
     final base = Uri.parse(_baseUrl);
-    final fullPath = base.path + AppConfig.apiPrefix + path;
-    return base.replace(
-      path: fullPath.replaceAll(RegExp(r'//+'), '/'),
-      queryParameters: query,
-    );
+    return base.replace(path: path, queryParameters: query);
   }
 
   Future<Object?> _request(
     String method,
     String path, {
-    String? token,
     Object? body,
-    String? idempotencyKey,
+    Map<String, String>? form,
     Map<String, String>? query,
+    String? idempotencyKey,
+    bool allowRedirect = false,
   }) async {
+    final uri = _uri(path, query);
     try {
-      final request = await _client.openUrl(method, _uri(path, query)).timeout(
+      final request = await _client.openUrl(method, uri).timeout(
             const Duration(seconds: 15),
           );
+      request.followRedirects = false;
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
-      if (body != null) {
+      final cookieHeader = _cookieJar.headerFor(uri);
+      if (cookieHeader != null) {
+        request.headers.set(HttpHeaders.cookieHeader, cookieHeader);
+      }
+      if (form != null) {
+        request.headers.set(
+          HttpHeaders.contentTypeHeader,
+          'application/x-www-form-urlencoded; charset=utf-8',
+        );
+        request.write(Uri(queryParameters: form).query);
+      } else if (body != null) {
         request.headers.contentType = ContentType.json;
         request.write(jsonEncode(body));
-      }
-      if (token != null && token.isNotEmpty) {
-        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       }
       if (idempotencyKey != null) {
         request.headers.set('Idempotency-Key', idempotencyKey);
       }
 
       final response = await request.close().timeout(const Duration(seconds: 20));
+      _cookieJar.absorb(response);
+      if (response.statusCode >= 300 &&
+          response.statusCode < 400 &&
+          allowRedirect) {
+        await response.drain<void>();
+        return null;
+      }
       final responseText = await utf8.decoder
           .bind(response)
           .join()
@@ -81,13 +126,16 @@ class ManagementApi {
         }
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        final message = decoded is Map ? decoded['message']?.toString() : null;
+        final message = decoded is Map
+            ? (decoded['error'] ?? decoded['message'])?.toString()
+            : null;
+        final fallback = response.statusCode == 401
+            ? 'Sua sessão expirou. Entre novamente.'
+            : response.statusCode == 403
+                ? 'Este perfil não tem permissão para esta operação.'
+                : 'O sistema de gestão respondeu com erro (${response.statusCode}).';
         throw ApiException(
-          message?.isNotEmpty == true
-              ? message!
-              : 'O servidor respondeu com erro (' +
-                  response.statusCode.toString() +
-                  ').',
+          message?.isNotEmpty == true ? message! : fallback,
           statusCode: response.statusCode,
         );
       }
@@ -102,8 +150,14 @@ class ManagementApi {
       throw const ApiException(
         'Não foi possível conectar ao sistema de gestão.',
       );
+    } on HandshakeException {
+      throw const ApiException(
+        'Não foi possível validar a conexão segura com o sistema de gestão.',
+      );
     } on FormatException {
-      throw const ApiException('O endereço da API está inválido.');
+      throw const ApiException('A resposta do sistema de gestão está inválida.');
+    } on HttpException {
+      throw const ApiException('Falha na comunicação com o sistema de gestão.');
     }
   }
 
@@ -112,163 +166,191 @@ class ManagementApi {
     throw const ApiException('Resposta inválida do sistema de gestão.');
   }
 
+  List<Map<String, dynamic>> _asMapList(Object? value) {
+    if (value is! List) {
+      throw const ApiException('A lista recebida do sistema está inválida.');
+    }
+    return value
+        .whereType<Map>()
+        .map((entry) => Map<String, dynamic>.from(entry))
+        .toList();
+  }
+
   Future<PosSession> login({
-    required String username,
+    required String email,
     required String password,
   }) async {
-    final response = await _request(
+    _cookieJar.clear();
+    _session = null;
+    final csrfResponse = await _request('GET', '/api/auth/csrf');
+    final csrfToken = _asMap(csrfResponse)['csrfToken']?.toString();
+    if (csrfToken == null || csrfToken.isEmpty) {
+      throw const ApiException('O sistema não retornou o token CSRF de login.');
+    }
+
+    await _request(
       'POST',
-      '/auth/login',
-      body: {
-        'username': username,
+      '/api/auth/callback/credentials',
+      allowRedirect: true,
+      form: {
+        'csrfToken': csrfToken,
+        'email': email.trim(),
         'password': password,
-        'terminalId': AppConfig.terminalId,
+        'callbackUrl': _baseUrl,
       },
     );
-    final session = PosSession.fromJson(_asMap(response));
-    if (session.accessToken.isEmpty || session.profileCode.isEmpty) {
-      throw const ApiException(
-        'A resposta de login não trouxe token e perfil do atendente.',
-      );
+    final session = await getSession();
+    if (session == null) {
+      _cookieJar.clear();
+      throw const ApiException('E-mail ou senha inválidos. Confira seus dados.');
     }
+    _session = session;
     return session;
   }
 
-  Future<PosCommand> findCommand(String code, String token) async {
+  Future<PosSession?> getSession() async {
+    final response = await _request('GET', '/api/auth/session');
+    if (response is! Map || response['user'] is! Map) return null;
+    final session = PosSession.fromAuthJson(_asMap(response));
+    if (session.userId.isEmpty || session.role.isEmpty) return null;
+    _session = session;
+    return session;
+  }
+
+  Future<void> signOut() async {
+    try {
+      final response = await _request('GET', '/api/auth/csrf');
+      final csrfToken = response is Map ? response['csrfToken']?.toString() : null;
+      if (csrfToken != null && csrfToken.isNotEmpty) {
+        await _request(
+          'POST',
+          '/api/auth/signout',
+          allowRedirect: true,
+          form: {'csrfToken': csrfToken, 'callbackUrl': _baseUrl},
+        );
+      }
+    } finally {
+      _cookieJar.clear();
+      _session = null;
+    }
+  }
+
+  Future<List<PosEvent>> getEvents() async {
+    final response = await _request('GET', '/api/v1/pos/events');
+    return _asMapList(response).map(PosEvent.fromJson).toList();
+  }
+
+  Future<PosBootstrap> getBootstrap(String eventId) async {
     final response = await _request(
       'GET',
-      '/commands/' + Uri.encodeComponent(code),
-      token: token,
+      '/api/v1/pos/bootstrap',
+      query: {'eventId': eventId},
+    );
+    return PosBootstrap.fromJson(_asMap(response));
+  }
+
+  Future<List<PosCommand>> getOrders(String eventId) async {
+    final response = await _request(
+      'GET',
+      '/api/v1/pos/orders',
+      query: {'eventId': eventId},
+    );
+    return _asMapList(response).map(PosCommand.fromJson).toList();
+  }
+
+  Future<PosCommand> openOrder({
+    required String eventId,
+    required String commandCode,
+    required String idempotencyKey,
+    String? tableId,
+    String? waiterEmployeeId,
+  }) async {
+    final response = await _request(
+      'POST',
+      '/api/v1/pos/orders',
+      idempotencyKey: idempotencyKey,
+      body: {
+        'eventId': eventId,
+        'commandCode': commandCode,
+        if (tableId != null && tableId.isNotEmpty) 'tableId': tableId,
+        if (waiterEmployeeId != null && waiterEmployeeId.isNotEmpty)
+          'waiterEmployeeId': waiterEmployeeId,
+      },
     );
     return PosCommand.fromJson(_asMap(response));
   }
 
-  Future<void> updateTable({
-    required String commandId,
-    required String tableNumber,
-    required String token,
-  }) async {
-    await _request(
-      'PATCH',
-      '/commands/' +
-          Uri.encodeComponent(commandId) +
-          '/table',
-      token: token,
-      body: {'tableNumber': tableNumber},
-    );
-  }
-
-  Future<List<PosProduct>> getCatalog({
-    required String profileCode,
-    required String token,
-  }) async {
+  Future<PosCommand> getOrder(String orderId) async {
     final response = await _request(
       'GET',
-      '/catalog',
-      token: token,
-      query: {'profileCode': profileCode},
+      '/api/v1/pos/orders/' + Uri.encodeComponent(orderId),
     );
-    final map = _asMap(response);
-    final products = map['products'];
-    if (products is! List) {
-      throw const ApiException('O catálogo recebido está em formato inválido.');
-    }
-    return products
-        .whereType<Map>()
-        .map((value) => PosProduct.fromJson(Map<String, dynamic>.from(value)))
-        .where((product) => product.available)
-        .toList();
+    return PosCommand.fromJson(_asMap(response));
+  }
+
+  Future<PosBill> getBill(String orderId) async {
+    final response = await _request(
+      'GET',
+      '/api/v1/pos/orders/' + Uri.encodeComponent(orderId),
+    );
+    return PosBill.fromOrderJson(_asMap(response));
   }
 
   Future<void> submitItems({
-    required String commandId,
+    required String orderId,
     required List<OrderLineRequest> items,
-    required String token,
     required String idempotencyKey,
   }) async {
-    await _request(
-      'POST',
-      '/commands/' +
-          Uri.encodeComponent(commandId) +
-          '/items',
-      token: token,
-      idempotencyKey: idempotencyKey,
-      body: {'items': items.map((item) => item.toJson()).toList()},
-    );
+    for (var index = 0; index < items.length; index++) {
+      final item = items[index];
+      await _request(
+        'POST',
+        '/api/v1/pos/orders/' +
+            Uri.encodeComponent(orderId) +
+            '/items',
+        idempotencyKey: '$idempotencyKey-${index + 1}',
+        body: item.toJson(),
+      );
+    }
   }
 
-  Future<PosBill> getBill({
-    required String commandId,
-    required String token,
-  }) async {
-    final response = await _request(
-      'GET',
-      '/commands/' +
-          Uri.encodeComponent(commandId) +
-          '/bill',
-      token: token,
-    );
-    return PosBill.fromJson(_asMap(response));
-  }
-
-  Future<String> createPaymentAttempt({
-    required String commandId,
-    required String token,
+  Future<void> recordPayment({
+    required String orderId,
     required int amountCents,
+    required String method,
     required String idempotencyKey,
   }) async {
-    final response = await _request(
-      'POST',
-      '/commands/' +
-          Uri.encodeComponent(commandId) +
-          '/payments/attempts',
-      token: token,
-      idempotencyKey: idempotencyKey,
-      body: {'amountCents': amountCents},
-    );
-    final orderId = _readMapValue(response, 'paymentOrderId');
-    if (orderId == null || orderId.isEmpty) {
-      throw const ApiException(
-        'O sistema não retornou o identificador do pagamento.',
-      );
-    }
-    if (!RegExp(r'^\d+$').hasMatch(orderId)) {
-      throw const ApiException(
-        'O identificador do pagamento precisa ser numérico para o app Stone.',
-      );
-    }
-    return orderId;
-  }
-
-  String? _readMapValue(Object? value, String key) {
-    if (value is Map) return value[key]?.toString();
-    return null;
-  }
-
-  Future<PosBill> reconcileStonePayment({
-    required String commandId,
-    required String token,
-    required StoneReturn paymentReturn,
-  }) async {
-    final values = paymentReturn.values;
     await _request(
       'POST',
-      '/commands/' +
-          Uri.encodeComponent(commandId) +
-          '/payments/reconcile',
-      token: token,
-      idempotencyKey: 'stone-' +
-          (values['itk'] ?? values['order_id'] ?? commandId),
+      '/api/v1/pos/orders/' +
+          Uri.encodeComponent(orderId) +
+          '/payments',
+      idempotencyKey: idempotencyKey,
       body: {
-        'returnCode': paymentReturn.code,
-        'orderId': values['order_id'],
-        'amountCents': int.tryParse(values['amount'] ?? ''),
-        'transactionKey': values['itk'],
-        'authorizationCode': values['authorization_code'],
+        'amount': centsToDecimal(amountCents),
+        'method': method,
       },
     );
-    return getBill(commandId: commandId, token: token);
   }
 
-  void close() => _client.close(force: true);
+  Future<void> cancelOrder({
+    required String orderId,
+    required String reason,
+    required String idempotencyKey,
+  }) async {
+    await _request(
+      'POST',
+      '/api/v1/pos/orders/' +
+          Uri.encodeComponent(orderId) +
+          '/cancel',
+      idempotencyKey: idempotencyKey,
+      body: {'reason': reason},
+    );
+  }
+
+  void close() {
+    _client.close(force: true);
+    _cookieJar.clear();
+    _session = null;
+  }
 }

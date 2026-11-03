@@ -1,151 +1,74 @@
-# Contrato da API do PDV
+# API de autenticação e operação do PDV
 
-O app usa a base `API_BASE_URL` seguida de `/api/pos/v1`. Todas as rotas protegidas usam `Authorization: Bearer <accessToken>` e JSON UTF-8. Valores monetários são inteiros em centavos.
+O aplicativo usa a API existente do sistema de gestão em `https://novo-caravela.vercel.app`. O endereço pode ser sobrescrito com `--dart-define=API_BASE_URL=...` para ambientes locais ou de preview.
 
-## Autenticação e perfis
+## Sessão compartilhada
 
-### `POST /auth/login`
+O login é feito com o e-mail e a senha já cadastrados na gestão. Não há credencial nem token de terminal. O cliente HTTP mantém os cookies recebidos do Auth.js e os envia novamente nas chamadas seguintes.
 
-Request:
+1. `GET /api/auth/csrf` e leitura do campo `csrfToken`.
+2. `POST /api/auth/callback/credentials` como formulário `application/x-www-form-urlencoded`, com `csrfToken`, `email`, `password` e `callbackUrl`. O app guarda os cookies `Set-Cookie` da resposta.
+3. `GET /api/auth/session` confirma o login e fornece `user.id`, `user.name`, `user.email`, `user.role` e `user.posCashRegisterId`.
+4. `POST /api/auth/signout`, também com CSRF, encerra a sessão.
 
-```json
-{
-  "username": "operador",
-  "password": "senha",
-  "terminalId": "bar-caixa-01"
-}
-```
+O app não salva a senha. A sessão Auth.js do sistema tem duração de oito horas. Auth.js usa `POST` para o callback Credentials e CSRF por cookie de dupla submissão; consulte a documentação oficial para mudanças de versão.
 
-Response:
+## Perfis
 
-```json
-{
-  "accessToken": "token-de-sessao",
-  "user": {
-    "id": "user-123",
-    "displayName": "Nome do atendente",
-    "profile": {
-      "code": "atendimento",
-      "name": "Atendimento"
-    },
-    "permissions": ["pos.orders.create"]
-  }
-}
-```
+| `user.role` | Fluxo no app | Canal retornado pelo bootstrap |
+| --- | --- | --- |
+| `POS_TICKETS` | Bilheteria e produtos de entrada | `TICKETS` |
+| `POS_TABLES` | Venda de mesas | `TABLES` |
+| `POS_BAR` | Venda direta do Bar | `BAR` |
+| `POS_WAITER` | Pedido de salão com mesa e garçom | `WAITER` |
+| `MANAGER`, `ADMIN` | Login compartilhado; abre a gestão web, que aplica as permissões atuais | Sem acesso às rotas POS; o navegador pode pedir novo login |
 
-O perfil Caixa pode usar `profile.code` igual a `caixa`/`cashier` ou a permissão `pos.cashier`. O backend deve validar autorização em cada chamada; a ocultação de telas não é uma barreira de segurança.
+O backend determina perfil e caixa pela sessão autenticada. O app não envia caixa ou perfil nos corpos das operações.
 
-## Comandas e pedidos
+## Inicialização do PDV
 
-### `GET /commands/{code}`
+### `GET /api/v1/pos/events`
 
-Response:
+Lista eventos abertos com sessão de caixa disponível para o usuário autenticado. A resposta é um array com `id`, `name`, `startsAt` e `endsAt`.
 
-```json
-{
-  "id": "command-123",
-  "code": "1234",
-  "status": "open",
-  "tableNumber": null
-}
-```
+### `GET /api/v1/pos/bootstrap?eventId={eventId}`
 
-### `PATCH /commands/{commandId}/table`
+Carrega evento, sessão, caixa, perfil e catálogo autorizado. A resposta inclui `user`, `register`, `event`, `session`, `products`, `tables` e `waiters`. O produto usa `price` decimal e `imageUrl`; o app converte valores para centavos internamente. Mesas e colaboradores ativos são preenchidos para o perfil `POS_WAITER`.
 
-Request: `{"tableNumber":"12"}`. O app omite essa chamada quando a mesa é pulada.
+## Comandas e itens
 
-### `GET /catalog?profileCode={profileCode}`
+### `GET /api/v1/pos/orders?eventId={eventId}`
 
-Response:
+Lista até 100 comandas do evento no caixa e perfil da sessão. O app procura o código informado entre as comandas abertas antes de criar uma nova.
 
-```json
-{
-  "products": [
-    {
-      "id": "product-1",
-      "name": "Água",
-      "description": "Garrafa 500 ml",
-      "categoryName": "Bebidas",
-      "priceCents": 500,
-      "imageUrl": "https://cdn.exemplo.com/produtos/agua.webp",
-      "available": true
-    }
-  ]
-}
-```
+### `POST /api/v1/pos/orders`
 
-O servidor filtra itens pelo perfil e retorna miniaturas dimensionadas para a grade.
+Abre uma comanda com `eventId`, `commandCode` e, no fluxo Garçom, `tableId` e `waiterEmployeeId`. Envia `Idempotency-Key`. Resposta contém o pedido criado.
 
-### `POST /commands/{commandId}/items`
+### `GET /api/v1/pos/orders/{id}`
 
-Request; o app envia um `Idempotency-Key` único e reutiliza a mesma chave quando uma requisição falha sem confirmação:
+Consulta a comanda, seus itens, pagamentos, mesa, garçom e total.
 
-```json
-{
-  "items": [
-    {"productId": "product-1", "quantity": 2}
-  ]
-}
-```
+### `POST /api/v1/pos/orders/{id}/items`
 
-O servidor deve deduplicar a chave e rejeitar preço/perfil inválidos. Resposta 2xx indica que os itens foram incluídos.
+Inclui um produto por chamada com `productId` e `quantity`, mais um `Idempotency-Key` único. O backend calcula o preço efetivo do evento. Em cestas com mais de um produto, o app envia uma chave estável por linha e reutiliza essas chaves em retries.
 
-## Conta e pagamento do perfil Caixa
+### `PATCH` e `DELETE /api/v1/pos/orders/{id}/items/{itemId}`
 
-### `GET /commands/{commandId}/bill`
+Rotas disponíveis para alteração e remoção de itens antes do primeiro pagamento. O app atual ainda usa inclusão de itens; não expõe alteração ou remoção de itens já adicionados.
 
-Response:
+### `POST /api/v1/pos/orders/{id}/cancel`
 
-```json
-{
-  "commandId": "command-123",
-  "commandCode": "1234",
-  "tableNumber": "12",
-  "status": "open",
-  "paymentStatus": "unpaid",
-  "items": [
-    {
-      "name": "Água",
-      "quantity": 2,
-      "unitPriceCents": 500,
-      "totalCents": 1000
-    }
-  ],
-  "subtotalCents": 1000,
-  "discountCents": 0,
-  "surchargeCents": 0,
-  "totalCents": 1000
-}
-```
+Cancela comanda sem pagamento; corpo `{"reason":"..."}`. A API atual exige motivo.
 
-`paymentStatus` deve informar ao menos `unpaid`, `pending`, `processing`, `authorized`, `paid` ou `failed`. O backend calcula os valores; o app não recalcula descontos ou taxas.
+## Pagamento
 
-### `POST /commands/{commandId}/payments/attempts`
+### `POST /api/v1/pos/orders/{id}/payments`
 
-Request com `Idempotency-Key`: `{"amountCents":1000}`.
+Registra pagamento confirmado. Corpo: `{"amount":"12.50","method":"DEBIT"}`; `method` aceita `CASH`, `PIX`, `BANK_TRANSFER`, `DEBIT` ou `CREDIT`. O app só chama essa rota após o retorno de sucesso do app Stone e envia `Idempotency-Key` para que a mesma gravação possa ser repetida com segurança. Depois consulta o pedido novamente; o backend marca `PAID` quando o valor acumulado cobre o total.
 
-Response: `{"paymentOrderId":"123456"}`.
+O backend atual não possui endpoint de tentativa/reconciliação Stone. Se a maquininha aprovar a transação e o app for encerrado antes do registro no sistema, o atendente deve conferir a comanda e o relatório Stone antes de uma nova cobrança.
 
-O servidor valida que o total ainda é o atual, registra uma tentativa pendente e reserva um identificador numérico aceito pelo app Stone. Repetir a mesma chave retorna a mesma tentativa e o mesmo identificador. Uma nova tentativa só deve ser criada quando a anterior estiver concluída ou marcada como falha/cancelada.
+## Erros e sessão expirada
 
-### `POST /commands/{commandId}/payments/reconcile`
-
-Request:
-
-```json
-{
-  "returnCode": "0",
-  "orderId": "123456",
-  "amountCents": 1000,
-  "transactionKey": "itk-retornado-pela-stone",
-  "authorizationCode": "codigo-de-autorizacao"
-}
-```
-
-O app envia essa rota para qualquer retorno do app Stone; `returnCode` diferente de `0` não representa pagamento aprovado. O servidor deve associar a resposta à tentativa existente, validar pedido, valor e transação, garantir idempotência e atualizar a comanda. Em seguida, o app consulta novamente `GET /bill`; somente `status`/`paymentStatus` confirmados pelo servidor liberam o fechamento.
-
-Se o retorno não chegar, o app consulta a conta. O servidor precisa manter tentativas em estado pendente até poder reconciliá-las, para que o caixa não inicie uma cobrança duplicada.
-
-## Erros
-
-Respostas não-2xx devem trazer JSON opcional como `{"message":"Comanda não encontrada."}`. O app apresenta a mensagem do servidor ou uma mensagem genérica com o código HTTP.
+A API responde erros no formato `{"error":"mensagem"}`. O app mostra a mensagem retornada. `401` indica que o usuário deve autenticar novamente; `403` indica perfil ou caixa sem permissão; `409` indica evento, sessão ou comanda em estado incompatível.

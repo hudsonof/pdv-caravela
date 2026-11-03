@@ -1,58 +1,34 @@
 # Caravela PDV
 
-Aplicativo Flutter Android para lançamento de pedidos e fechamento de comandas em terminais POS. O perfil do atendente vem do sistema de gestão:
+Aplicativo Flutter Android para operações de Bilheteria, Mesas, Bar e Garçom nos terminais Stone. O login usa os mesmos usuários da gestão e consulta a sessão Auth.js antes de liberar qualquer operação.
 
-- **Atendimento:** informa a comanda, pode vincular uma mesa e seleciona produtos do catálogo autorizado.
-- **Caixa:** consulta a conta atual, pode imprimi-la no POS e abrir o app de pagamento Stone.
+## Fluxo implementado
 
-## O que está implementado
+- Login por e-mail e senha, com CSRF e cookie jar para a sessão Auth.js.
+- Consulta de eventos disponíveis; seleção do evento carrega sessão de caixa, perfil e catálogo via bootstrap.
+- Perfis `POS_TICKETS`, `POS_TABLES`, `POS_BAR` e `POS_WAITER`; Garçom escolhe mesa e colaborador antes de abrir a comanda.
+- Entrada de comanda por digitação ou leitura de QR Code/códigos de barras pela câmera. Leitor integrado configurado como teclado também pode preencher o campo.
+- Reaproveitamento de comanda aberta, inclusão idempotente de produtos e imagens retornadas pela gestão.
+- Conferência/impressão da conta e pagamento pelo app Stone. O pagamento só é registrado na gestão depois do retorno de sucesso da Stone.
+- Perfis `MANAGER` e `ADMIN` autenticam com a mesma conta e podem abrir o sistema de gestão no navegador; não acessam as rotas POS. O navegador mantém sua própria sessão.
 
-- Login conectado à API do sistema de gestão; token mantido apenas em memória.
-- Entrada manual de comanda e leitura por câmera de QR Code, EAN-13/EAN-8, Code 128, Code 39 e UPC-A.
-- Entrada por leitor externo configurado como teclado (keyboard wedge), com a caixa de texto da comanda em foco.
-- Etapa opcional de mesa e catálogo responsivo com pesquisa, categorias, imagens e carrinho.
-- Envio idempotente de itens à comanda.
-- Fluxo Caixa: conta detalhada, impressão em texto via app Stone, criação de tentativa de pagamento no backend, abertura do app Stone e reconciliação da transação com o backend.
-- Canal Android nativo isolado para scanner, pagamento e impressão.
-- Min SDK Android 24; a compatibilidade de cada POS precisa ser confirmada fisicamente e homologada.
-
-## Configuração e execução
+## Executar
 
 Requisitos: Flutter 3.47.0, Android SDK e JDK 17.
 
 ```sh
 flutter pub get
 flutter run \
-  --dart-define=API_BASE_URL=https://api.exemplo.com \
-  --dart-define=TERMINAL_ID=bar-caixa-01 \
+  --dart-define=API_BASE_URL=https://novo-caravela.vercel.app \
   --dart-define=SUPPORT_CONTACT=suporte@exemplo.com
 ```
 
-`API_BASE_URL` é a origem da API, sem `/api/pos/v1`. `TERMINAL_ID` deve ser único por equipamento. `SUPPORT_CONTACT` é mostrado na seção “Fale Conosco”.
+O endereço de produção já é o padrão. `API_BASE_URL` pode ser sobrescrito para ambientes de desenvolvimento e preview. O app não armazena a senha; os cookies da sessão permanecem no cookie jar em memória durante o processo do aplicativo.
 
-Use HTTPS. Para desenvolvimento no emulador Android, `http://10.0.2.2:8080` pode ser habilitado no manifesto de debug. Em terminal físico, use uma URL acessível pelo POS e protegida por HTTPS.
+Confira rotas e payloads em [docs/API_CONTRACT.md](docs/API_CONTRACT.md). A API do sistema de gestão precisa estar implantada e o usuário POS deve estar ativo, associado a um caixa compatível e a uma sessão aberta.
 
-O repositório não contém URLs de produção, credenciais, certificados ou dados de loja. O aplicativo não entra em modo de demonstração quando a API está ausente.
+## Android e Stone
 
-## Contrato do sistema de gestão
+O `minSdk` é 24, compatível com Android 7 ou superior. Scanner, pagamentos e impressão usam código Android nativo e deeplinks Stone. A disponibilidade varia por terminal, versões dos apps POS e configuração do estabelecimento. Confira [docs/STONE_INTEGRATION.md](docs/STONE_INTEGRATION.md) e valide fisicamente cada modelo.
 
-A API precisa implementar as rotas, respostas e regras de idempotência descritas em [docs/API_CONTRACT.md](docs/API_CONTRACT.md). O servidor é a fonte de verdade para perfis, permissões, preços, conta, total, estado do pagamento e fechamento.
-
-## Stone POS
-
-A integração usa os deeplinks Android oficiais de pagamento e impressão. Os apps Stone correspondentes precisam estar instalados no POS. Pagamento só é confirmado após reconciliação do backend; o retorno do app Stone, isoladamente, não fecha a comanda. Detalhes e dependências estão em [docs/STONE_INTEGRATION.md](docs/STONE_INTEGRATION.md).
-
-O nome de pacote atual (`br.com.novocaravela.pdv.campolivre`) é provisório para desenvolvimento. Confirme-o com o programa de parceiros Stone antes de publicar ou homologar.
-
-## Build de distribuição
-
-Configure a assinatura de release no Gradle/CI com keystore e senhas guardados como secrets. Não versione keystore nem `key.properties`.
-
-```sh
-flutter build apk --release \
-  --dart-define=API_BASE_URL=https://api.exemplo.com \
-  --dart-define=TERMINAL_ID=bar-caixa-01 \
-  --dart-define=SUPPORT_CONTACT=suporte@exemplo.com
-```
-
-Antes de distribuir, valide instalação, scanner, impressora, deeplink de pagamento, retorno e desempenho no Sunmi P2-B, Positivo D400 e em cada modelo adicional que será anunciado como compatível.
+O package name `br.com.novocaravela.pdv.campolivre` é provisório. Defina o package aprovado pelo programa Stone antes de publicar. Configure assinatura de release com keystore e senhas guardados em secrets; não versione keystore nem `key.properties`.

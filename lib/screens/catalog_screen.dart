@@ -8,16 +8,20 @@ import '../widgets/support_button.dart';
 class CatalogScreen extends StatefulWidget {
   const CatalogScreen({
     required this.command,
+    required this.bill,
     required this.products,
     required this.onSubmit,
+    required this.onCheckout,
     required this.onLogout,
     super.key,
   });
 
   final PosCommand command;
+  final PosBill bill;
   final List<PosProduct> products;
   final Future<void> Function(List<OrderLineRequest> items, String idempotencyKey)
       onSubmit;
+  final VoidCallback onCheckout;
   final VoidCallback onLogout;
 
   @override
@@ -30,6 +34,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
   String _category = 'Todos';
   bool _submitting = false;
   String? _pendingIdempotencyKey;
+  bool _retryRequired = false;
 
   @override
   void dispose() {
@@ -68,6 +73,14 @@ class _CatalogScreenState extends State<CatalogScreen> {
   }
 
   void _changeQuantity(PosProduct product, int delta) {
+    if (_retryRequired) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Tente novamente o envio antes de alterar a seleção.'),
+        ),
+      );
+      return;
+    }
     setState(() {
       final updated = (_quantities[product.id] ?? 0) + delta;
       if (updated <= 0) {
@@ -107,6 +120,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
       setState(() {
         _quantities.clear();
         _pendingIdempotencyKey = null;
+        _retryRequired = false;
       });
       Navigator.of(sheetContext).pop();
       ScaffoldMessenger.of(context).showSnackBar(
@@ -114,6 +128,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
       );
     } catch (error) {
       if (!mounted) return;
+      setState(() => _retryRequired = true);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(error.toString())),
       );
@@ -339,18 +354,42 @@ class _CatalogScreenState extends State<CatalogScreen> {
       ),
       bottomNavigationBar: SafeArea(
         minimum: const EdgeInsets.all(12),
-        child: FilledButton.icon(
-          onPressed: _itemCount == 0 ? null : _showCart,
-          icon: const Icon(Icons.shopping_basket_outlined),
-          label: Text(
-            _itemCount == 0
-                ? 'Comanda sem itens selecionados'
-                : 'Ver comanda (' +
-                    _itemCount.toString() +
-                    ') · ' +
-                    formatCents(_cartTotalCents),
-          ),
-          style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(54)),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (widget.bill.totalCents > 0) ...[
+              OutlinedButton.icon(
+                onPressed: widget.bill.isPaid ? null : widget.onCheckout,
+                icon: const Icon(Icons.receipt_long_outlined),
+                label: Text(
+                  widget.bill.isPaid
+                      ? 'Comanda paga'
+                      : 'Conta ' +
+                          formatCents(widget.bill.remainingCents) +
+                          ' · conferir / pagar',
+                ),
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(48),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+            FilledButton.icon(
+              onPressed: _itemCount == 0 ? null : _showCart,
+              icon: const Icon(Icons.shopping_basket_outlined),
+              label: Text(
+                _itemCount == 0
+                    ? 'Adicionar produtos à comanda'
+                    : 'Ver seleção (' +
+                        _itemCount.toString() +
+                        ') · ' +
+                        formatCents(_cartTotalCents),
+              ),
+              style: FilledButton.styleFrom(
+                minimumSize: const Size.fromHeight(54),
+              ),
+            ),
+          ],
         ),
       ),
     );

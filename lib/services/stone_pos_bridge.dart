@@ -54,11 +54,13 @@ class StonePosBridge {
 
   Future<void> launchPayment({
     required int amountCents,
+    required String transactionType,
     String? orderId,
   }) async {
     try {
       await _channel.invokeMethod<void>('launchPayment', {
         'amountCents': amountCents,
+        'transactionType': transactionType,
         'orderId': orderId,
       });
     } on PlatformException catch (error) {
@@ -77,6 +79,16 @@ class StonePosBridge {
       throw Exception(error.message ?? 'Não foi possível abrir a impressão Stone.');
     } on MissingPluginException {
       throw Exception('Impressão Stone disponível apenas no terminal Android.');
+    }
+  }
+
+  Future<void> openManagement(String url) async {
+    try {
+      await _channel.invokeMethod<void>('openManagement', {'url': url});
+    } on PlatformException catch (error) {
+      throw Exception(error.message ?? 'Não foi possível abrir a gestão.');
+    } on MissingPluginException {
+      throw Exception('A abertura do sistema de gestão está disponível no Android.');
     }
   }
 }

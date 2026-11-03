@@ -2,36 +2,29 @@
 
 ## Pagamento
 
-O app Android abre `payment-app://pay` via Intent com:
+O app abre `payment-app://pay` via Intent com valor em centavos, valor não editável, `transaction_type` selecionado e `return_scheme=caravelapdv`. Após retorno `code=0`, o app registra o valor retornado na comanda pela rota `POST /api/v1/pos/orders/{id}/payments`, enviando forma de pagamento e `Idempotency-Key`. O pedido é recarregado e o backend é a fonte de verdade do estado pago.
 
-- `amount`: total em centavos;
-- `editable_amount=0`: impede alteração do total no app de pagamento;
-- `order_id`: identificador numérico reservado pela API;
-- `return_scheme=caravelapdv`: scheme registrado no manifesto para receber o host `pay-response`.
+O app não considera o retorno Stone sozinho como baixa financeira. Caso a conexão falhe depois da aprovação, a mesma chave idempotente pode ser usada para repetir o registro. Se o aplicativo for encerrado antes dessa repetição, confira o terminal Stone e a comanda no sistema de gestão antes de cobrar novamente.
 
-O app aceita como sucesso de deeplink apenas `code=0`, mas ainda pede ao backend para reconciliar a transação e só fecha a comanda quando a API retorna o estado pago. Valores recebidos são filtrados; PAN e nome do portador não são enviados à API nem registrados em logs.
-
-Se o app de pagamento não estiver instalado, o terminal retorna uma mensagem de integração indisponível. O POS precisa ter os aplicativos Stone necessários e estar associado ao estabelecimento. A integração e o fluxo final devem passar pelo programa de parceiros/homologação da Stone.
+O terminal precisa ter o app Stone de pagamento instalado e estar associado ao estabelecimento. A integração deve ser validada com a Stone e com os modelos de POS usados na operação.
 
 ## Impressão da conta
 
-O app cria uma lista de linhas de texto e abre `printer-app://print` com `PRINTABLE_CONTENT`, `SHOW_FEEDBACK_SCREEN` e `SCHEME_RETURN=caravelapdv`. O retorno é interpretado como confirmação de impressão ou erro da impressora. A conta impressa é uma prévia para conferência, não o comprovante da transação.
+O app envia linhas de texto para `printer-app://print`, com `PRINTABLE_CONTENT`, `SHOW_FEEDBACK_SCREEN` e `SCHEME_RETURN=caravelapdv`. A conta impressa é uma prévia para conferência, não o comprovante fiscal ou de pagamento.
 
-A documentação da Stone informa que o deeplink customizado de impressão depende do bundle de apps POS 7.7.0 ou superior; confirme o bundle presente em cada terminal. Modelos sem esse recurso precisam da alternativa de impressão aprovada para aquele POS, como o provider nativo do SDK.
-
-O payload atual contém texto e não imagens. Isso evita exceder o limite Android de dados entre aplicativos. Para imagens/QR Codes, envie pequenas chamadas sequenciais e aguarde cada retorno.
+A documentação Stone indica que o deeplink customizado de impressão depende do bundle POS 7.7.0 ou superior; confirme a versão em cada terminal. Se não estiver disponível, será necessário adotar o provider/SDK aprovado para o modelo.
 
 ## Scanner
 
-O botão “Ler código” abre uma tela nativa CameraX + ML Kit com QR Code, EAN-13, EAN-8, Code 128, Code 39 e UPC-A. Leitores integrados configurados como teclado (keyboard wedge) preenchem o campo de comanda com foco e enviam Enter para continuar. Uma API de leitura proprietária do fabricante deve ser adicionada como adapter Kotlin quando o POS não oferece modo teclado.
+O botão de leitura abre uma tela nativa CameraX + ML Kit para QR Code, EAN-13, EAN-8, Code 128, Code 39 e UPC-A. Leitores integrados configurados como teclado preenchem o campo de comanda com foco e enviam Enter para continuar. Um SDK proprietário do fabricante pode ser integrado como adapter Kotlin quando o leitor não oferece modo teclado.
 
-Digitação manual continua disponível em todos os terminais. A leitura por câmera depende de câmera traseira utilizável e permissão; sem ela, mantenha a alternativa manual ou conecte leitor compatível.
+Digitação manual permanece disponível. A leitura por câmera depende de câmera traseira funcional e permissão do usuário.
 
 ## Matriz inicial a validar
 
 | Terminal | Android informado | Validação necessária |
 | --- | --- | --- |
-| Sunmi P2-B | Android 7.1 na documentação Stone | Câmera/ML Kit, memória, leitor, impressora e deeplinks |
-| Positivo D400 | Android 11 informado pelo projeto | Câmera, leitor, impressora e deeplinks |
+| Sunmi P2-B | Android 7.1 | Câmera/ML Kit, memória, leitor, impressora e deeplinks |
+| Positivo D400 | Android 11 | Câmera, leitor, impressora e deeplinks |
 
-O código comum não garante que uma função de hardware exista em todos os terminais. Atualize a matriz apenas após teste físico e homologação.
+`minSdk=24` dá suporte a Android 7.0 ou superior. Isso não garante que impressora, scanner integrado ou apps Stone estejam disponíveis em todos os terminais.

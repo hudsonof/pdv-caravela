@@ -1,24 +1,23 @@
 # Desenvolvimento
 
-## Configuração
+## Configuração local
 
 1. Instale Flutter 3.47.0, Android SDK e JDK 17.
 2. Execute `flutter pub get`.
-3. Configure `API_BASE_URL`, `TERMINAL_ID` e `SUPPORT_CONTACT` por `--dart-define`.
-4. Implemente a API descrita em [API_CONTRACT.md](API_CONTRACT.md).
-5. Rode o app em emulador Android e depois nos terminais Stone físicos.
+3. Inicie com `flutter run --dart-define=API_BASE_URL=https://novo-caravela.vercel.app`.
+4. Crie na gestão um usuário POS ativo, atribua o caixa compatível e abra uma sessão de caixa para um evento.
 
-## Estrutura
+O app usa o ambiente de produção por padrão. Para testes locais, use `--dart-define=API_BASE_URL=http://10.0.2.2:PORTA` no emulador ou o endereço acessível pelo terminal. O manifesto de debug permite HTTP; o manifesto de release exige HTTPS.
 
-- `lib/screens`: telas de login, comanda, mesa, catálogo e caixa.
-- `lib/services/management_api.dart`: autenticação, catálogo, pedidos, conta e reconciliação.
-- `lib/services/stone_pos_bridge.dart`: interface Flutter para os recursos nativos.
-- `android/app/src/main/kotlin`: leitor CameraX/ML Kit e Intents de impressão/pagamento Stone.
+## Fluxo de dados
 
-O token de sessão permanece em memória e é descartado ao sair/encerrar o app. Nenhum dado de pagamento ou senha é gravado localmente.
+O cliente executa CSRF, callback Credentials e consulta de sessão Auth.js. O cookie jar em memória é aplicado às chamadas `/api/v1/pos/*`. Depois consulta eventos e bootstrap; preços, perfil, caixa e autorização vêm do backend. Os itens são enviados individualmente com chave de idempotência por linha.
 
-## Integração e distribuição
+## Build e dispositivos
 
-O deeplink precisa voltar para `caravelapdv://pay-response` ou `caravelapdv://print`; mantenha os hosts e o scheme consistentes no Android Manifest, `AppConfig` e chamadas nativas. Confirme o nome de pacote definitivo e as versões de apps/bundle com a Stone antes da homologação.
+```sh
+flutter build apk --release \
+  --dart-define=API_BASE_URL=https://novo-caravela.vercel.app
+```
 
-Configure assinatura de release fora do controle de versão. Não adicione `local.properties`, chaves ou tokens do repositório privado Stone ao Git.
+Configure a assinatura de release no Gradle/CI usando secrets. Valide instalação, autenticação, leitor, câmera, impressão, pagamento e retorno no Sunmi P2-B, Positivo D400 e em cada modelo adicional antes de anunciá-lo como compatível.

@@ -6,21 +6,21 @@ import '../models/pos_models.dart';
 class LoginScreen extends StatefulWidget {
   const LoginScreen({required this.onLogin, super.key});
 
-  final Future<PosSession> Function(String username, String password) onLogin;
+  final Future<PosSession> Function(String email, String password) onLogin;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final _usernameController = TextEditingController();
+  final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _busy = false;
   String? _error;
 
   @override
   void dispose() {
-    _usernameController.dispose();
+    _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
   }
@@ -30,9 +30,9 @@ class _LoginScreenState extends State<LoginScreen> {
       setState(() => _error = 'O endereço da API ainda não foi configurado.');
       return;
     }
-    if (_usernameController.text.trim().isEmpty ||
+    if (_emailController.text.trim().isEmpty ||
         _passwordController.text.isEmpty) {
-      setState(() => _error = 'Informe usuário e senha.');
+      setState(() => _error = 'Informe e-mail e senha.');
       return;
     }
     setState(() {
@@ -41,7 +41,7 @@ class _LoginScreenState extends State<LoginScreen> {
     });
     try {
       await widget.onLogin(
-        _usernameController.text.trim(),
+        _emailController.text.trim(),
         _passwordController.text,
       );
     } catch (error) {
@@ -74,7 +74,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Entre com seu usuário do sistema de gestão.',
+                    'Entre com o mesmo e-mail e senha do sistema de gestão.',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodyLarge,
                   ),
@@ -101,11 +101,12 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   const SizedBox(height: 28),
                   TextField(
-                    controller: _usernameController,
+                    controller: _emailController,
+                    keyboardType: TextInputType.emailAddress,
                     textInputAction: TextInputAction.next,
-                    autofillHints: const [AutofillHints.username],
+                    autofillHints: const [AutofillHints.email],
                     decoration: const InputDecoration(
-                      labelText: 'Usuário',
+                      labelText: 'E-mail',
                       prefixIcon: Icon(Icons.person_outline),
                     ),
                   ),
@@ -149,7 +150,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   const SizedBox(height: 20),
                   Text(
-                    'O perfil e as permissões são carregados do sistema de gestão.',
+                    'A sessão e o perfil são consultados no sistema de gestão.',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
