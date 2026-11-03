@@ -7,7 +7,6 @@ import '../models/pos_models.dart';
 class StonePosBridge {
   StonePosBridge._() {
     _channel.setMethodCallHandler(_handleNativeCall);
-    _consumePendingReturn();
   }
 
   static final StonePosBridge instance = StonePosBridge._();
@@ -29,16 +28,64 @@ class StonePosBridge {
     }
   }
 
-  Future<void> _consumePendingReturn() async {
+  Future<StoneReturn?> readPendingReturn() async {
     try {
       final result = await _channel.invokeMapMethod<Object?, Object?>(
-        'consumePendingReturn',
+        'readPendingReturn',
       );
-      if (result != null) _returns.add(StoneReturn.fromMap(result));
+      return result == null ? null : StoneReturn.fromMap(result);
+    } on MissingPluginException {
+      return null;
+    } on PlatformException catch (error) {
+      throw Exception(error.message ?? 'Não foi possível recuperar o retorno Stone.');
+    }
+  }
+
+  Future<void> clearPendingReturn() async {
+    try {
+      await _channel.invokeMethod<void>('clearPendingReturn');
     } on MissingPluginException {
       // A integração nativa só existe no build Android.
-    } on PlatformException {
-      // As ações mostram o erro ao serem solicitadas.
+    } on PlatformException catch (error) {
+      throw Exception(error.message ?? 'Não foi possível limpar o retorno Stone.');
+    }
+  }
+
+  Future<void> savePaymentContext({
+    required String orderId,
+    required String commandCode,
+    required int amountCents,
+    required String method,
+    required String idempotencyKey,
+  }) async {
+    await _channel.invokeMethod<void>('savePaymentContext', {
+      'orderId': orderId,
+      'commandCode': commandCode,
+      'amountCents': amountCents,
+      'method': method,
+      'idempotencyKey': idempotencyKey,
+    });
+  }
+
+  Future<Map<String, dynamic>?> readPaymentContext() async {
+    try {
+      return await _channel.invokeMapMethod<String, dynamic>(
+        'readPaymentContext',
+      );
+    } on MissingPluginException {
+      return null;
+    } on PlatformException catch (error) {
+      throw Exception(error.message ?? 'Não foi possível recuperar a cobrança pendente.');
+    }
+  }
+
+  Future<void> clearPaymentContext() async {
+    try {
+      await _channel.invokeMethod<void>('clearPaymentContext');
+    } on MissingPluginException {
+      // A integração nativa só existe no build Android.
+    } on PlatformException catch (error) {
+      throw Exception(error.message ?? 'Não foi possível limpar a cobrança pendente.');
     }
   }
 
