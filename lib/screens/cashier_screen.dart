@@ -43,11 +43,13 @@ class _CashierScreenState extends State<CashierScreen> {
   bool _checkingPayment = false;
   bool _paid = false;
   bool _needsPaymentSync = false;
+  bool _manualReviewRequired = false;
   String _method = 'DEBIT';
   String? _attemptIdempotencyKey;
   StoneReturn? _successfulStoneReturn;
   int? _amountAtLaunch;
   int? _successfulAmountCents;
+  String? _pendingOtherOrderCode;
   String? _message;
   bool _messageIsError = false;
 
@@ -56,6 +58,7 @@ class _CashierScreenState extends State<CashierScreen> {
     super.initState();
     _paid = widget.bill.isPaid;
     _subscription = StonePosBridge.instance.returns.listen(_handleStoneReturn);
+    unawaited(_loadPendingStoneReturn());
   }
 
   @override
@@ -154,6 +157,9 @@ class _CashierScreenState extends State<CashierScreen> {
   }
 
   Future<void> _pay() async {
+    if (_pendingOtherOrderCode != null ||
+        _manualReviewRequired ||
+        _awaitingPayment) return;
     if (widget.bill.remainingCents <= 0) {
       _setMessage('Não há saldo pendente nesta comanda.');
       return;
@@ -164,12 +170,23 @@ class _CashierScreenState extends State<CashierScreen> {
     });
     _attemptIdempotencyKey ??= _newAttemptKey();
     _amountAtLaunch = widget.bill.remainingCents;
-    setState(() {
-      _awaitingPayment = true;
-      _message = 'Finalize no app Stone. O pagamento será registrado após o retorno de sucesso.';
-      _messageIsError = false;
-    });
     try {
+      await StonePosBridge.instance.savePaymentContext(
+        orderId: widget.bill.commandId,
+        commandCode: widget.bill.commandCode,
+        amountCents: widget.bill.remainingCents,
+        method: _method,
+        idempotencyKey: _attemptIdempotencyKey!,
+      );
+      if (!mounted) {
+        await StonePosBridge.instance.clearPaymentContext();
+        return;
+      }
+      setState(() {
+        _awaitingPayment = true;
+        _message = 'Finalize no app Stone. O pagamento será registrado após o retorno de sucesso.';
+        _messageIsError = false;
+      });
       await StonePosBridge.instance.launchPayment(
         amountCents: widget.bill.remainingCents,
         transactionType: _method,
@@ -177,7 +194,16 @@ class _CashierScreenState extends State<CashierScreen> {
     } catch (error) {
       _awaitingPayment = false;
       _attemptIdempotencyKey = null;
-      _setMessage(error.toString());
+      try {
+        await StonePosBridge.instance.clearPaymentContext();
+        _setMessage(error.toString());
+      } catch (cleanupError) {
+        _manualReviewRequired = true;
+        _setMessage(
+          'Não foi possível iniciar o pagamento nem limpar o estado local. Confira a Stone antes de outra tentativa. ' +
+              cleanupError.toString(),
+        );
+      }
     } finally {
       if (mounted) setState(() => _startingPayment = false);
     }
@@ -192,11 +218,34 @@ class _CashierScreenState extends State<CashierScreen> {
   }
 
   Future<void> _handleStoneReturn(StoneReturn result) async {
-    if (result.host != 'pay-response' || !_awaitingPayment) return;
+    if (result.host == 'print' && _printing) {
+      await StonePosBridge.instance.clearPendingReturn();
+      return;
+    }
+    if (result.host != 'pay-response' ||
+        !_awaitingPayment ||
+        _attemptIdempotencyKey == null ||
+        _pendingOtherOrderCode != null ||
+        _checkingPayment) {
+      return;
+    }
+    if (result.code == null || result.code!.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _manualReviewRequired = true;
+          _message = 'O retorno da Stone veio sem um código de aprovação. Confira a transação na Stone e na gestão antes de continuar.';
+          _messageIsError = true;
+        });
+      }
+      return;
+    }
     if (result.code != '0') {
+      await StonePosBridge.instance.clearPendingReturn();
+      await StonePosBridge.instance.clearPaymentContext();
       if (mounted) {
         setState(() {
           _awaitingPayment = false;
+          _manualReviewRequired = false;
           _attemptIdempotencyKey = null;
           _successfulStoneReturn = null;
           _successfulAmountCents = null;
@@ -220,7 +269,125 @@ class _CashierScreenState extends State<CashierScreen> {
     }
     _successfulAmountCents =
         int.tryParse(result.values['amount'] ?? '') ?? _amountAtLaunch;
+    final expectedAmount = _amountAtLaunch;
+    if (_successfulAmountCents == null ||
+        expectedAmount == null ||
+        _successfulAmountCents != expectedAmount) {
+      if (mounted) {
+        setState(() {
+          _manualReviewRequired = true;
+          _message = 'O valor retornado pela Stone não confere com o valor enviado. Confira a transação na Stone e na gestão antes de sincronizar ou cobrar novamente.';
+          _messageIsError = true;
+        });
+      }
+      return;
+    }
     await _registerSuccessfulPayment();
+  }
+
+  Future<void> _loadPendingStoneReturn() async {
+    try {
+      final bridge = StonePosBridge.instance;
+      final context = await bridge.readPaymentContext();
+      if (!mounted) return;
+      if (context != null) {
+        final contextOrderId = context['orderId']?.toString();
+        if (widget.bill.isPaid && contextOrderId == widget.bill.commandId) {
+          await bridge.clearPaymentContext();
+          await bridge.clearPendingReturn();
+          return;
+        }
+        if (contextOrderId != widget.bill.commandId) {
+          final otherCode = context['commandCode']?.toString() ?? '';
+          if (otherCode.isEmpty) {
+            setState(() {
+              _awaitingPayment = true;
+              _manualReviewRequired = true;
+              _message = 'Existe uma cobrança Stone sem identificação de comanda. Confira a Stone e a gestão antes de continuar.';
+              _messageIsError = true;
+            });
+            return;
+          }
+          setState(() {
+            _pendingOtherOrderCode = otherCode;
+            _awaitingPayment = true;
+            _message = 'Há um pagamento Stone pendente para a comanda ' +
+                otherCode +
+                '. Abra essa comanda para sincronizar antes de iniciar outra cobrança.';
+            _messageIsError = true;
+          });
+          return;
+        }
+        final key = context['idempotencyKey']?.toString() ?? '';
+        final amount = context['amountCents'];
+        final restoredAmount = amount is num
+            ? amount.toInt()
+            : int.tryParse(amount?.toString() ?? '');
+        final method = context['method']?.toString() ?? _method;
+        if (key.isEmpty ||
+            restoredAmount == null ||
+            restoredAmount <= 0 ||
+            !const {'DEBIT', 'CREDIT', 'PIX'}.contains(method)) {
+          setState(() {
+            _awaitingPayment = true;
+            _manualReviewRequired = true;
+            _message = 'Existe um contexto de pagamento incompleto. Confira o terminal Stone antes de cobrar novamente.';
+            _messageIsError = true;
+          });
+          return;
+        }
+        setState(() {
+          _attemptIdempotencyKey = key;
+          _amountAtLaunch = restoredAmount;
+          _method = method;
+          _awaitingPayment = true;
+          _message = 'Pagamento Stone pendente. Confira o terminal para confirmar o resultado.';
+          _messageIsError = false;
+        });
+        final pending = await bridge.readPendingReturn();
+        if (!mounted) return;
+        if (pending?.host == 'pay-response') {
+          await _handleStoneReturn(pending!);
+        } else if (pending?.host == 'print') {
+          await bridge.clearPendingReturn();
+          if (mounted) {
+            setState(() {
+              _manualReviewRequired = true;
+              _message = 'Não recebemos o retorno do pagamento. Confira a transação na Stone e na gestão antes de continuar.';
+              _messageIsError = true;
+            });
+          }
+        } else if (mounted) {
+          setState(() {
+            _manualReviewRequired = true;
+            _message = 'Não recebemos o retorno do pagamento. Confira a transação na Stone e na gestão antes de continuar.';
+            _messageIsError = true;
+          });
+        }
+        return;
+      }
+
+      final pending = await bridge.readPendingReturn();
+      if (!mounted) return;
+      if (pending != null && pending.host == 'pay-response') {
+        setState(() {
+          _manualReviewRequired = true;
+          _message = 'Recebemos um retorno Stone sem o vínculo local da comanda. Confira o pagamento na Stone e na gestão antes de continuar.';
+          _messageIsError = true;
+        });
+      } else if (pending != null) {
+        await bridge.clearPendingReturn();
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _manualReviewRequired = true;
+          _message = 'Não foi possível recuperar com segurança o estado do pagamento. Confira a Stone e a gestão antes de continuar. ' +
+              error.toString();
+          _messageIsError = true;
+        });
+      }
+    }
   }
 
   Future<void> _registerSuccessfulPayment() async {
@@ -241,11 +408,14 @@ class _CashierScreenState extends State<CashierScreen> {
         method: _method,
         idempotencyKey: key,
       );
+      await StonePosBridge.instance.clearPendingReturn();
+      await StonePosBridge.instance.clearPaymentContext();
       if (!mounted) return;
       setState(() {
         _paid = updatedBill.isPaid;
         _awaitingPayment = false;
         _needsPaymentSync = false;
+        _manualReviewRequired = false;
         _attemptIdempotencyKey = null;
         _successfulStoneReturn = null;
         _successfulAmountCents = null;
@@ -276,6 +446,11 @@ class _CashierScreenState extends State<CashierScreen> {
     try {
       final refreshed = await widget.onRefresh();
       if (!mounted) return;
+      if (refreshed.isPaid) {
+        await StonePosBridge.instance.clearPendingReturn();
+        await StonePosBridge.instance.clearPaymentContext();
+      }
+      if (!mounted) return;
       setState(() {
         _paid = refreshed.isPaid;
         _message = _paid
@@ -286,12 +461,10 @@ class _CashierScreenState extends State<CashierScreen> {
         if (_paid) {
           _awaitingPayment = false;
           _needsPaymentSync = false;
+          _manualReviewRequired = false;
           _attemptIdempotencyKey = null;
           _successfulStoneReturn = null;
           _successfulAmountCents = null;
-        } else if (_successfulStoneReturn == null) {
-          _awaitingPayment = false;
-          _attemptIdempotencyKey = null;
         }
       });
     } catch (error) {
@@ -299,6 +472,65 @@ class _CashierScreenState extends State<CashierScreen> {
     } finally {
       if (mounted) setState(() => _checkingPayment = false);
     }
+  }
+
+  Future<void> _reviewPendingReturn() async {
+    final hasLocalAttempt = _attemptIdempotencyKey != null;
+    final stoneApproved = _successfulStoneReturn?.code == '0';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Conferir pagamento Stone'),
+        content: Text(
+          stoneApproved
+              ? 'A Stone retornou aprovação, mas o valor não confere. Atualize a comanda e confira o valor no relatório Stone. Não libere uma nova cobrança até resolver a diferença.'
+              : hasLocalAttempt
+              ? 'Confirme somente depois de verificar no app Stone e na gestão que esta tentativa não foi aprovada nem registrada. Se houve aprovação, não libere uma nova cobrança.'
+              : 'Confira o valor e o horário no app Stone e na gestão. Depois de verificar que não há pagamento pendente, você pode liberar o terminal para uma nova operação.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Voltar'),
+          ),
+          if (!stoneApproved)
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Conferi; não houve aprovação'),
+            ),
+          if (stoneApproved)
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Atualizar comanda'),
+            ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (confirmed != true) {
+      if (confirmed == false && stoneApproved && mounted) await _refresh();
+      return;
+    }
+    try {
+      await StonePosBridge.instance.clearPendingReturn();
+      await StonePosBridge.instance.clearPaymentContext();
+    } catch (error) {
+      _setMessage('Não foi possível limpar o retorno pendente. ' + error.toString());
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      _awaitingPayment = false;
+      _needsPaymentSync = false;
+      _manualReviewRequired = false;
+      _pendingOtherOrderCode = null;
+      _attemptIdempotencyKey = null;
+      _successfulStoneReturn = null;
+      _successfulAmountCents = null;
+      _amountAtLaunch = null;
+      _message = 'Tentativa conferida. A comanda continua aberta.';
+      _messageIsError = false;
+    });
   }
 
   void _setMessage(String message, {bool isError = true}) {
@@ -326,9 +558,7 @@ class _CashierScreenState extends State<CashierScreen> {
             icon: const Icon(Icons.arrow_back),
           ),
           IconButton(
-            onPressed: _checkingPayment || (_awaitingPayment && !_needsPaymentSync)
-                ? null
-                : _refresh,
+            onPressed: _checkingPayment ? null : _refresh,
             tooltip: 'Atualizar conta',
             icon: const Icon(Icons.refresh),
           ),
@@ -447,6 +677,28 @@ class _CashierScreenState extends State<CashierScreen> {
                             ),
                           ),
                         ),
+                      if (_pendingOtherOrderCode != null)
+                        OutlinedButton.icon(
+                          onPressed: widget.onNewCommand,
+                          icon: const Icon(Icons.manage_search),
+                          label: Text(
+                            'Abrir comanda ' + _pendingOtherOrderCode!,
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size.fromHeight(48),
+                          ),
+                        ),
+                      if (_manualReviewRequired) ...[
+                        OutlinedButton.icon(
+                          onPressed: _checkingPayment ? null : _reviewPendingReturn,
+                          icon: const Icon(Icons.fact_check_outlined),
+                          label: const Text('Conferir situação no Stone e na gestão'),
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size.fromHeight(48),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                      ],
                       if (_paid)
                         FilledButton.icon(
                           onPressed: widget.onNewCommand,
@@ -489,7 +741,10 @@ class _CashierScreenState extends State<CashierScreen> {
                               child: Text('Pix'),
                             ),
                           ],
-                          onChanged: _awaitingPayment || _checkingPayment
+                          onChanged: _awaitingPayment ||
+                                  _checkingPayment ||
+                                  _manualReviewRequired ||
+                                  _pendingOtherOrderCode != null
                               ? null
                               : (value) {
                                   if (value != null) setState(() => _method = value);
@@ -500,7 +755,12 @@ class _CashierScreenState extends State<CashierScreen> {
                           builder: (context, constraints) {
                             final stacked = constraints.maxWidth < 470;
                             final printButton = OutlinedButton.icon(
-                              onPressed: _printing ? null : _print,
+                              onPressed: _printing ||
+                                      _awaitingPayment ||
+                                      _manualReviewRequired ||
+                                      _pendingOtherOrderCode != null
+                                  ? null
+                                  : _print,
                               icon: _printing
                                   ? const SizedBox(
                                       width: 18,
@@ -521,6 +781,8 @@ class _CashierScreenState extends State<CashierScreen> {
                               onPressed: _startingPayment ||
                                       _checkingPayment ||
                                       _awaitingPayment ||
+                                      _manualReviewRequired ||
+                                      _pendingOtherOrderCode != null ||
                                       bill.remainingCents <= 0
                                   ? null
                                   : _pay,
