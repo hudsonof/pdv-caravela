@@ -34,7 +34,10 @@ class ScannerActivity : ComponentActivity() {
     private lateinit var previewView: PreviewView
     private lateinit var cameraProvider: ProcessCameraProvider
     private val finished = AtomicBoolean(false)
-    private val scanner: BarcodeScanner by lazy {
+    private var barcodeScanner: BarcodeScanner? = null
+
+    private fun scanner(): BarcodeScanner {
+        barcodeScanner?.let { return it }
         val options = BarcodeScannerOptions.Builder()
             .setBarcodeFormats(
                 Barcode.FORMAT_QR_CODE,
@@ -45,7 +48,7 @@ class ScannerActivity : ComponentActivity() {
                 Barcode.FORMAT_UPC_A
             )
             .build()
-        BarcodeScanning.getClient(options)
+        return BarcodeScanning.getClient(options).also { barcodeScanner = it }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -99,6 +102,7 @@ class ScannerActivity : ComponentActivity() {
         val cancel = Button(this).apply {
             text = "Cancelar"
             setOnClickListener {
+                finished.set(true)
                 setResult(RESULT_CANCELED)
                 finish()
             }
@@ -119,6 +123,7 @@ class ScannerActivity : ComponentActivity() {
         providerFuture.addListener(
             {
                 try {
+                    if (isFinishing || finished.get()) return@addListener
                     cameraProvider = providerFuture.get()
                     val preview = Preview.Builder().build().also {
                         it.setSurfaceProvider(previewView.surfaceProvider)
@@ -159,7 +164,7 @@ class ScannerActivity : ComponentActivity() {
             mediaImage,
             proxy.imageInfo.rotationDegrees
         )
-        scanner.process(input)
+        scanner().process(input)
             .addOnSuccessListener { barcodes ->
                 val value = barcodes.firstNotNullOfOrNull { barcode ->
                     barcode.rawValue?.trim()?.takeIf { it.isNotEmpty() }
@@ -202,7 +207,8 @@ class ScannerActivity : ComponentActivity() {
         if (::cameraProvider.isInitialized) {
             cameraProvider.unbindAll()
         }
-        scanner.close()
+        barcodeScanner?.close()
         super.onDestroy()
     }
 }
+
