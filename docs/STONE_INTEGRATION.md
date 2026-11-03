@@ -4,7 +4,9 @@
 
 O app abre `payment-app://pay` via Intent com valor em centavos, valor não editável, `transaction_type` selecionado e `return_scheme=caravelapdv`. Após retorno `code=0`, o app registra o valor retornado na comanda pela rota `POST /api/v1/pos/orders/{id}/payments`, enviando forma de pagamento e `Idempotency-Key`. O pedido é recarregado e o backend é a fonte de verdade do estado pago.
 
-O app não considera o retorno Stone sozinho como baixa financeira. Caso a conexão falhe depois da aprovação, a mesma chave idempotente pode ser usada para repetir o registro. Se o aplicativo for encerrado antes dessa repetição, confira o terminal Stone e a comanda no sistema de gestão antes de cobrar novamente.
+O app não considera o retorno Stone sozinho como baixa financeira. Antes de abrir a Stone, salva localmente o identificador da comanda, valor, forma e chave idempotente; também preserva o retorno recebido. Se o processo for recriado após a aprovação, tenta registrar novamente a mesma operação com a mesma chave. O retorno só é apagado depois que a gestão confirma a gravação.
+
+Se a Stone não devolver um resultado associado, o valor divergir ou a gestão não confirmar o registro, o app bloqueia novas cobranças para essa tentativa. O atendente deve conferir Stone e gestão; só pode liberar uma nova tentativa após confirmar que não houve aprovação. A API atual não oferece consulta/reconciliação de transações diretamente com a Stone.
 
 O terminal precisa ter o app Stone de pagamento instalado e estar associado ao estabelecimento. A integração deve ser validada com a Stone e com os modelos de POS usados na operação.
 
